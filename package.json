@@ -1,4 +1,14 @@
-"type": "module",
-"scripts": {
-  "start": "node index.js"
+{
+  "name": "video-audio-merge-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "fluent-ffmpeg": "^2.1.2"
+  }
 }
