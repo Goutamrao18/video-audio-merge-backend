@@ -1,17 +1,24 @@
-import cors from "cors";
 import express from "express";
 import multer from "multer";
 import ffmpeg from "fluent-ffmpeg";
+import cors from "cors";
 import fs from "fs";
 import path from "path";
 
 const app = express();
+
+/* ✅ ADD CORS HERE (THIS IS THE FIX) */
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST"]
+}));
+
 const PORT = process.env.PORT || 3000;
 
 /* ---------- Upload Config ---------- */
 const upload = multer({
   dest: "uploads/",
-  limits: { fileSize: 30 * 1024 * 1024 } // 30MB limit
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB
 });
 
 /* ---------- Root Route ---------- */
@@ -28,12 +35,12 @@ app.get("/health", (req, res) => {
 app.post(
   "/merge",
   upload.fields([
-    { name: "videos", maxCount: 5 },
-    { name: "audios", maxCount: 5 }
+    { name: "videos", maxCount: 10 },
+    { name: "audios", maxCount: 2 }
   ]),
   async (req, res) => {
     try {
-      if (!req.files.videos || !req.files.audios) {
+      if (!req.files?.videos || !req.files?.audios) {
         return res.status(400).json({ error: "Videos and audios required" });
       }
 
@@ -45,13 +52,11 @@ app.post(
       const mixedAudio = "mixed_audio.mp3";
       const outputFile = "final_output.mp4";
 
-      /* ---------- Create video list ---------- */
       fs.writeFileSync(
         videoListFile,
         videos.map(v => `file '${path.resolve(v)}'`).join("\n")
       );
 
-      /* ---------- Merge Videos ---------- */
       await new Promise((resolve, reject) => {
         ffmpeg()
           .input(videoListFile)
@@ -62,7 +67,6 @@ app.post(
           .on("error", reject);
       });
 
-      /* ---------- Mix Audios ---------- */
       await new Promise((resolve, reject) => {
         const cmd = ffmpeg();
         audios.forEach(a => cmd.input(a));
@@ -74,14 +78,12 @@ app.post(
           .on("error", reject);
       });
 
-      /* ---------- Merge Video + Audio ---------- */
       ffmpeg(mergedVideo)
         .input(mixedAudio)
         .outputOptions(["-c:v copy", "-c:a aac"])
         .save(outputFile)
         .on("end", () => {
           res.download(outputFile, () => {
-            // cleanup
             [...videos, ...audios, videoListFile, mergedVideo, mixedAudio, outputFile]
               .forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
           });
