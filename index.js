@@ -97,7 +97,27 @@ app.post(
     }
   }
 );
+import fetch from "node-fetch";
 
+app.get("/pixabay-audio", async (req, res) => {
+  try {
+    const audioUrl = req.query.url;
+    if (!audioUrl) {
+      return res.status(400).json({ error: "Missing audio URL" });
+    }
+
+    const response = await fetch(audioUrl);
+    if (!response.ok) {
+      return res.status(500).json({ error: "Failed to fetch audio" });
+    }
+
+    res.setHeader("Content-Type", "audio/mpeg");
+    response.body.pipe(res);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Audio proxy failed" });
+  }
+});
 /* ---------- Start Server ---------- */
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
