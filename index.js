@@ -1,180 +1,143 @@
 import express from "express";
-import multer from "multer";
-import ffmpeg from "fluent-ffmpeg";
 import cors from "cors";
+import fetch from "node-fetch";
+import multer from "multer";
+import { exec } from "child_process";
 import fs from "fs";
 import path from "path";
-import fetch from "node-fetch";
 
 const app = express();
-
-/* =========================
-   CORS (REQUIRED FOR MEDO)
-========================= */
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST"]
-}));
-
 const PORT = process.env.PORT || 3000;
 
-/* =========================
-   UPLOAD CONFIG
-========================= */
-const upload = multer({
-  dest: "uploads/",
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB
-});
+/* -------------------- MIDDLEWARE -------------------- */
+app.use(cors({ origin: "*" }));
+app.use(express.json());
 
-/* =========================
-   ROOT
-========================= */
+/* -------------------- STORAGE -------------------- */
+const upload = multer({ dest: "uploads/" });
+const OUTPUT_DIR = "outputs";
+
+if (!fs.existsSync(OUTPUT_DIR)) {
+  fs.mkdirSync(OUTPUT_DIR);
+}
+
+/* -------------------- HEALTH CHECK -------------------- */
 app.get("/", (req, res) => {
   res.send("🎬 Video + Audio Merge API is running 🚀");
 });
 
-app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
-});
-
-/* =========================
-   PIXABAY AUDIO PROXY (PREVIEW)
-========================= */
-app.get("/pixabay-audio", async (req, res) => {
+/* ====================================================
+   🎵 PIXABAY MUSIC SEARCH (RETURNS TWO URLS)
+   ==================================================== */
+app.get("/pixabay-music", async (req, res) => {
   try {
-    const audioUrl = req.query.url;
-    if (!audioUrl || !audioUrl.endsWith(".mp3")) {
-      return res.status(400).json({ error: "Invalid audio URL" });
-    }
+    const q = req.query.q || "cinematic";
 
-    const response = await fetch(audioUrl);
-    if (!response.ok) {
-      return res.status(500).json({ error: "Failed to fetch audio" });
-    }
+    const r = await fetch(
+      `https://pixabay.com/api/music/?key=${process.env.PIXABAY_KEY}&q=${encodeURIComponent(
+        q
+      )}`
+    );
 
-    res.setHeader("Content-Type", "audio/mpeg");
-    response.body.pipe(res);
+    const data = await r.json();
+
+    res.json(
+      data.hits.map(track => ({
+        id: track.id,
+        title: track.tags,
+        duration: track.duration,
+
+        // Browser preview (proxied)
+        previewUrl: `/pixabay-audio?url=${encodeURIComponent(track.audio)}`,
+
+        // FFmpeg-safe direct URL (IMPORTANT)
+        downloadUrl: track.audio
+      }))
+    );
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Audio proxy failed" });
+    res.status(500).json({ error: "Pixabay search failed" });
   }
 });
 
-/* =========================
-   HELPER: DOWNLOAD AUDIO
-========================= */
-async function downloadAudio(url, outputPath) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error("Audio download failed");
+/* ====================================================
+   🔊 PIXABAY AUDIO PREVIEW PROXY (BROWSER ONLY)
+   ==================================================== */
+app.get("/pixabay-audio", async (req, res) => {
+  try {
+    const audioUrl = req.query.url;
+    if (!audioUrl) return res.status(400).send("Missing audio URL");
 
-  const stream = fs.createWriteStream(outputPath);
-  await new Promise((resolve, reject) => {
-    response.body.pipe(stream);
-    response.body.on("error", reject);
-    stream.on("finish", resolve);
-  });
-}
+    const r = await fetch(audioUrl);
+    res.setHeader("Content-Type", "audio/mpeg");
+    r.body.pipe(res);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Failed to fetch audio");
+  }
+});
 
-/* =========================
-   MERGE ROUTE (FINAL FIX)
-========================= */
+/* ====================================================
+   🎬 VIDEO + AUDIO MERGE (FFMPEG)
+   ==================================================== */
 app.post(
   "/merge",
   upload.fields([
-    { name: "videos", maxCount: 10 },
-    { name: "audios", maxCount: 2 }
+    { name: "videos", maxCount: 1 },
+    { name: "audios", maxCount: 1 }
   ]),
   async (req, res) => {
     try {
       if (!req.files?.videos) {
-        return res.status(400).json({ error: "Videos required" });
+        return res.status(400).json({ error: "Video required" });
       }
 
-      const videos = req.files.videos.map(v => v.path);
-      let audioFiles = [];
-
-      /* ---- CASE 1: AUDIO FILE UPLOAD ---- */
-      if (req.files.audios) {
-        audioFiles = req.files.audios.map(a => a.path);
-      }
-
-      /* ---- CASE 2: PIXABAY AUDIO URL ---- */
-      if (req.body.audioUrl) {
-        const audioPath = `uploads/pixabay_${Date.now()}.mp3`;
-        await downloadAudio(req.body.audioUrl, audioPath);
-        audioFiles.push(audioPath);
-      }
-
-      if (audioFiles.length === 0) {
-        return res.status(400).json({ error: "Audio required" });
-      }
-
-      /* ---- FILES ---- */
-      const videoListFile = "videos.txt";
-      const mergedVideo = "merged_video.mp4";
-      const mixedAudio = "mixed_audio.mp3";
-      const outputFile = "final_output.mp4";
-
-      fs.writeFileSync(
-        videoListFile,
-        videos.map(v => `file '${path.resolve(v)}'`).join("\n")
+      const videoPath = req.files.videos[0].path;
+      const audioFile = req.files.audios?.[0];
+      const audioUrl = req.body.audioUrl; // CDN URL from Pixabay
+      const outputPath = path.join(
+        OUTPUT_DIR,
+        `final_${Date.now()}.mp4`
       );
 
-      /* ---- MERGE VIDEOS ---- */
-      await new Promise((resolve, reject) => {
-        ffmpeg()
-          .input(videoListFile)
-          .inputOptions(["-f concat", "-safe 0"])
-          .outputOptions(["-c copy"])
-          .save(mergedVideo)
-          .on("end", resolve)
-          .on("error", reject);
-      });
+      let ffmpegCmd;
 
-      /* ---- MIX AUDIO ---- */
-      await new Promise((resolve, reject) => {
-        const cmd = ffmpeg();
-        audioFiles.forEach(a => cmd.input(a));
+      // ✅ PRIORITY: direct CDN URL
+      if (audioUrl) {
+        ffmpegCmd = `ffmpeg -y -i "${videoPath}" -i "${audioUrl}" \
+-map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -shortest "${outputPath}"`;
+      }
 
-        cmd
-          .complexFilter([`amix=inputs=${audioFiles.length}:dropout_transition=2`])
-          .save(mixedAudio)
-          .on("end", resolve)
-          .on("error", reject);
-      });
+      // fallback: uploaded audio file
+      else if (audioFile) {
+        ffmpegCmd = `ffmpeg -y -i "${videoPath}" -i "${audioFile.path}" \
+-map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -shortest "${outputPath}"`;
+      }
 
-      /* ---- FINAL MERGE ---- */
-      ffmpeg(mergedVideo)
-        .input(mixedAudio)
-        .outputOptions(["-c:v copy", "-c:a aac", "-shortest"])
-        .save(outputFile)
-        .on("end", () => {
-          res.download(outputFile, () => {
-            [
-              ...videos,
-              ...audioFiles,
-              videoListFile,
-              mergedVideo,
-              mixedAudio,
-              outputFile
-            ].forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
-          });
-        })
-        .on("error", err => {
+      // video only
+      else {
+        ffmpegCmd = `ffmpeg -y -i "${videoPath}" -c copy "${outputPath}"`;
+      }
+
+      exec(ffmpegCmd, err => {
+        if (err) {
           console.error(err);
-          res.status(500).json({ error: err.message });
-        });
+          return res.status(500).json({ error: "Merge failed" });
+        }
 
+        res.download(outputPath, () => {
+          fs.unlinkSync(videoPath);
+          if (audioFile) fs.unlinkSync(audioFile.path);
+        });
+      });
     } catch (err) {
       console.error(err);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: "Server error" });
     }
   }
 );
 
-/* =========================
-   START SERVER
-========================= */
+/* -------------------- START SERVER -------------------- */
 app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
