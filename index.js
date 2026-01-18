@@ -1,3 +1,6 @@
+app.get("/", (req, res) => {
+  res.send("Video + Audio Merge API is running 🚀");
+});
 import express from "express";
 import cors from "cors";
 
